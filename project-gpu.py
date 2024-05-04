@@ -4,7 +4,7 @@ import numpy as np
 import math
 from PIL import Image
 from numba import cuda
-kernel = np.array([[1, 4,6,4, 1], [4, 16, 24,16,4], [6, 24, 36,24,6],[4, 16, 24,16,4],[1, 4,6,4, 1]]) / 256
+
 def compute_threads_and_blocks(imagetab,threadsperblock):
     width, height = imagetab.shape[:2]
     blockspergrid_x = math.ceil(width / threadsperblock[0])
@@ -27,7 +27,7 @@ def RGBToBWKernel(source, destination):
         destination[x,y]=int(math.ceil(0.3*source[x,y,0]+0.59*source[x,y,1]+0.11*source[x,y,2]))
 
 @cuda.jit
-def gaussian_kernel(input_image, output_image):
+def gaussian_kernel(input_image, output_image,kernel):
     row, col = cuda.grid(2)
     #Process one pixel
     if row < input_image.shape[0] and col < input_image.shape[1]:
@@ -47,9 +47,9 @@ def gaussian_kernel(input_image, output_image):
                     x =  col + j
                 w = kernel[i + half_kernel, j + half_kernel]
                 new_pixel_value += w * input_image[y, x,0]
-        output_image[row, col,0] = new_pixel_value
-        output_image[row, col,1] = new_pixel_value
-        output_image[row, col,2] = new_pixel_value
+        output_image[row, col,0] = new_pixel_value/ 256
+        output_image[row, col,1] = new_pixel_value/ 256
+        output_image[row, col,2] = new_pixel_value/ 256
 
 
 @cuda.jit
@@ -114,7 +114,41 @@ def hysterisis_kernel(thresholded, output_image):
             output_image[row, col,2] = 0
 
 
+def process_image(imagetab, threads_per_block, blocks_per_grid,d_kernel, args):
+    output_bw =cuda.to_device(np.zeros_like(imagetab))
+    RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)
+    cuda.synchronize()
 
+    if args.bw:
+        return output_bw.copy_to_host()
+
+    output_gaussian = cuda.to_device(np.zeros_like(imagetab))
+    gaussian_kernel[blocks_per_grid, threads_per_block](output_bw, output_gaussian,d_kernel)
+    cuda.synchronize()
+
+    if args.gauss:
+        return output_gaussian.copy_to_host()
+
+    magnitude = cuda.to_device(np.zeros_like(imagetab, dtype=np.float32))
+    angle = cuda.to_device(np.zeros_like(imagetab, dtype=np.float32))
+    sobel_kernel[blocks_per_grid, threads_per_block](output_gaussian, magnitude, angle)
+    cuda.synchronize()
+
+    if args.sobel:
+        return magnitude.copy_to_host(),angle.copy_to_host()
+
+    thresholded = cuda.to_device(np.zeros_like(imagetab))
+    threshold_kernel[blocks_per_grid, threads_per_block](magnitude, thresholded)
+    cuda.synchronize()
+
+    if args.threshold:
+        return thresholded.copy_to_host()
+
+    result=cuda.to_device(np.zeros_like(imagetab, dtype=np.uint8))
+    hysterisis_kernel[blocks_per_grid, threads_per_block](thresholded, result)
+    cuda.synchronize()
+
+    return result.copy_to_host()
 
 def main():
     parser = argparse.ArgumentParser(description='Canny Edge Detection')
@@ -125,48 +159,22 @@ def main():
     parser.add_argument('--gauss', action='store_true', help='Perform the bw_kernel and the gauss_kernel')
     parser.add_argument('--sobel', action='store_true', help='Perform all kernels up to sobel_kernel and write to disk the magnitude of each pixel')
     parser.add_argument('--threshold', action='store_true', help='Perform all kernels up to threshold_kernel')
+    kernel = np.array([[1, 4,6,4, 1], [4, 16, 24,16,4], [6, 24, 36,24,6],[4, 16, 24,16,4],[1, 4,6,4, 1]]) 
+    d_kernel=cuda.to_device(kernel)
 
     args = parser.parse_args()
-    threads_per_block = (16, 16)   
+    threads_per_block = (16, 16)
+    if args.tb:
+        threads_per_block = (args.tb,args.tb)   
+
     image = Image.open(args.inputImage)
     imagetab = np.array(image)
-    result=np.zeros_like(imagetab, dtype=np.uint8) 
-    if args.tb:
-        threads_per_block = (args.tb,args.tb)
+    d_imagetab =cuda.to_device(imagetab )
+
     threads_per_block,blocks_per_grid=compute_threads_and_blocks(imagetab,threads_per_block)
-    if args.bw:
-        RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, result)
-    elif args.gauss:
-        output_bw = np.zeros_like(imagetab)
-        RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)
-        gaussian_kernel[blocks_per_grid, threads_per_block](output_bw, result)
-    elif args.sobel:
-        output_bw = np.zeros_like(imagetab)
-        RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)
-        output_gaussian = np.zeros_like(imagetab)
-        gaussian_kernel[blocks_per_grid, threads_per_block](output_bw, output_gaussian)
-        angle = np.zeros_like(imagetab, dtype=np.float32)
-        sobel_kernel[blocks_per_grid, threads_per_block](output_gaussian, result, angle)
-    elif args.threshold:
-        output_bw = np.zeros_like(imagetab)
-        RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)
-        output_gaussian = np.zeros_like(imagetab)
-        gaussian_kernel[blocks_per_grid, threads_per_block](output_bw, output_gaussian)
-        magnitude = np.zeros_like(imagetab, dtype=np.float32)
-        angle = np.zeros_like(imagetab, dtype=np.float32)
-        sobel_kernel[blocks_per_grid, threads_per_block](output_gaussian, magnitude, angle)
-        threshold_kernel[blocks_per_grid, threads_per_block](magnitude, result)
-    else:
-        output_bw = np.zeros_like(imagetab)
-        RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)
-        output_gaussian = np.zeros_like(imagetab)
-        gaussian_kernel[blocks_per_grid, threads_per_block](output_bw, output_gaussian)
-        magnitude = np.zeros_like(imagetab, dtype=np.float32)
-        angle = np.zeros_like(imagetab, dtype=np.float32)
-        sobel_kernel[blocks_per_grid, threads_per_block](output_gaussian, magnitude, angle)
-        thresholded = np.zeros_like(imagetab)
-        threshold_kernel[blocks_per_grid, threads_per_block](magnitude, thresholded)
-        hysterisis_kernel[blocks_per_grid, threads_per_block](thresholded, result)
+
+    result = process_image(d_imagetab, threads_per_block, blocks_per_grid,d_kernel, args)
+   
     output_image_pillow = Image.fromarray(result)
     output_image_pillow.save(args.outputImage)
     print("L'image a été enregistrée avec succès sous",args.outputImage)
