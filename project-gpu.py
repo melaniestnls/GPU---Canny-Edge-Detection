@@ -25,6 +25,20 @@ def RGBToBWKernel(source, destination):
     if (x<width and y<height) :
         # ( (0.3 * R) + (0.59 * G) + (0.11 * B) )
         destination[x,y]=int(math.ceil(0.3*source[x,y,0]+0.59*source[x,y,1]+0.11*source[x,y,2]))
+        
+        
+#def to_gray(bgr):
+#    B, G, R = bgr  # Inversion de l'ordre des canaux
+#    return (0.3 * R) + (0.59 * G) + (0.11 * B)
+
+#def bw_kernel(image):
+#    height, width, _ = image.shape
+#    dst = np.zeros((height, width), dtype=np.uint8)
+#    for i in range(height):
+#        for j in range(width):
+#            # L'intensité en niveaux de gris est la moyenne des valeurs des canaux de couleur
+#            dst[i, j] = np.mean(image[i, j])
+#    return dst
 
 @cuda.jit
 def gaussian_kernel(input_image, output_image,kernel):
@@ -113,7 +127,6 @@ def hysterisis_kernel(thresholded, output_image):
             output_image[row, col,1] = 0
             output_image[row, col,2] = 0
 
-
 def process_image(imagetab, threads_per_block, blocks_per_grid,d_kernel, args):
     output_bw =cuda.to_device(np.zeros_like(imagetab))
     RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)
@@ -179,6 +192,24 @@ def main():
     output_image_pillow.save(args.outputImage)
     print("L'image a été enregistrée avec succès sous",args.outputImage)
 
+    image = cv2.imread(args.inputImage, cv2.IMREAD_COLOR)  # Ajoutez le drapeau cv2.IMREAD_COLOR
+
+    #if args.bw:
+    #    result = bw_kernel(image)
+    # elif args.gauss:
+    #     result = gaussian_kernel(bw_kernel(image))
+    # elif args.sobel:
+    #     magnitude, _ = sobel_kernel(gaussian_kernel(bw_kernel(image)))
+    #     cv2.imwrite(args.outputImage, magnitude)
+    #     return
+    # elif args.threshold:
+    #     magnitude, _ = sobel_kernel(gaussian_kernel(bw_kernel(image)))
+    #     thresholded = threshold_kernel(magnitude, 50, 150)  # Adjust threshold values as needed
+    #     result = hysterisis_kernel(thresholded)
+    # else:
+    #     magnitude, _ = sobel_kernel(gaussian_kernel(bw_kernel(image)))
+    #     thresholded = threshold_kernel(magnitude, 50, 150)  # Adjust threshold values as needed
+    #     result = hysterisis_kernel(thresholded)
 
 if __name__ == '__main__':
     main()
