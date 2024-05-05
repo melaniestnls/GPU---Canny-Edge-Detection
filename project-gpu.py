@@ -1,3 +1,5 @@
+# Adjo Emmanuelle Adote et Mélanie Stanislas
+
 import argparse  
 import numpy as np  
 import math  
