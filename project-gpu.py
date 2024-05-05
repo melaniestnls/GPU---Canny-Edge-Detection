@@ -1,58 +1,46 @@
+import argparse  
+import numpy as np  
+import math  
+from PIL import Image 
+from numba import cuda 
 
-import argparse
-import numpy as np
-import math
-from PIL import Image
-from numba import cuda
+# Fonction pour calculer les dimensions de la grille de threads
+def compute_threads_and_blocks(imagetab, threads_per_block):
 
-def compute_threads_and_blocks(imagetab,threadsperblock):
     width, height = imagetab.shape[:2]
-    blockspergrid_x = math.ceil(width / threadsperblock[0])
-    blockspergrid_y = math.ceil(height / threadsperblock[1])
+    blockspergrid_x = int(math.ceil(width / threads_per_block[0]))
+    blockspergrid_y = int(math.ceil(height / threads_per_block[1]))
     blockspergrid = (blockspergrid_x, blockspergrid_y)
-    print("Thread blocks ", threadsperblock)
+    print("Thread blocks ", threads_per_block)
     print("Grid ", blockspergrid)
-    return threadsperblock,blockspergrid
+    return threads_per_block, blockspergrid
 
-
-
+# Noyau CUDA pour convertir l'image en niveaux de gris
 @cuda.jit
-def RGBToBWKernel(source, destination):
-    height = source.shape[1]
-    width = source.shape[0]
-    #offset =8 
-    x,y = cuda.grid(2)
-    if (x<width and y<height) :
-        # ( (0.3 * R) + (0.59 * G) + (0.11 * B) )
-        destination[x,y]=int(math.ceil(0.3*source[x,y,0]+0.59*source[x,y,1]+0.11*source[x,y,2]))
-        
-        
-#def to_gray(bgr):
-#    B, G, R = bgr  # Inversion de l'ordre des canaux
-#    return (0.3 * R) + (0.59 * G) + (0.11 * B)
+def RGBToBWKernel(input_image, output_image):
+    # Récupérer la hauteur et la largeur de l'image d'entrée
+    height = input_image.shape[1]
+    width = input_image.shape[0]
+    x, y = cuda.grid(2)
+    # Vérifie si le thread est dans les limites de l'image
+    if (x < width and y < height):
+        # Conversion en niveaux de gris: (0.3 * R) + (0.59 * G) + (0.11 * B)
+        output_image[x, y] = int(math.ceil(0.3 * input_image[x, y, 0] + 0.59 * input_image[x, y, 1] + 0.11 * input_image[x, y, 2]))
 
-#def bw_kernel(image):
-#    height, width, _ = image.shape
-#    dst = np.zeros((height, width), dtype=np.uint8)
-#    for i in range(height):
-#        for j in range(width):
-#            # L'intensité en niveaux de gris est la moyenne des valeurs des canaux de couleur
-#            dst[i, j] = np.mean(image[i, j])
-#    return dst
-
+# Noyau CUDA pour appliquer un flou gaussien
 @cuda.jit
 def gaussian_kernel(input_image, output_image,kernel):
+    #Obtienir les indices de thread en deux dimensions
     row, col = cuda.grid(2)
-    #Process one pixel
+    #Vérifie si le thread est dans les limites de l'image
     if row < input_image.shape[0] and col < input_image.shape[1]:
-        # Apply Gaussian blur
+        #Appliquer le flou gaussien
         half_kernel = kernel.shape[0] // 2
         new_pixel_value = 0.0
         for i in range(-half_kernel, half_kernel + 1):
             for j in range(-half_kernel, half_kernel + 1):
                 if row+i>input_image.shape[0] - 1 or row+i<0 :
                     y=row
-
                 else:
                     y = row + i
                 if col+j>input_image.shape[1] - 1 or col+j<0:
@@ -65,105 +53,127 @@ def gaussian_kernel(input_image, output_image,kernel):
         output_image[row, col,1] = new_pixel_value/ 256
         output_image[row, col,2] = new_pixel_value/ 256
 
-
+# Noyau CUDA pour calculer le gradient de Sobel
 @cuda.jit
 def sobel_kernel(input_image, magnitude, angle):
+
     row, col = cuda.grid(2)
-    
     if row < input_image.shape[0] and col < input_image.shape[1]:
-        sobelx = input_image[max(0, row - 1), min(input_image.shape[1] - 1, col + 1),0] - \
-                 input_image[max(0, row - 1), max(0, col - 1),0] + \
-                 2 * input_image[row, min(input_image.shape[1] - 1, col + 1),0] - \
-                 2 * input_image[row, max(0, col - 1),0] + \
-                 input_image[min(input_image.shape[0] - 1, row + 1), min(input_image.shape[1] - 1, col + 1),0] - \
-                 input_image[min(input_image.shape[0] - 1, row + 1), max(0, col - 1),0]
-                 
-        sobely = input_image[max(0, row - 1), min(input_image.shape[1] - 1, col + 1),0] + \
-                 2 * input_image[min(input_image.shape[0] - 1, row + 1), min(input_image.shape[1] - 1, col + 1),0] + \
-                 input_image[min(input_image.shape[0] - 1, row + 1), min(input_image.shape[1] - 1, col + 1),0] - \
-                 (input_image[max(0, row - 1), max(0, col - 1),0] + \
-                  2 * input_image[min(input_image.shape[0] - 1, row + 1), max(0, col - 1),0] + \
-                  input_image[min(input_image.shape[0] - 1, row + 1), max(0, col - 1),0])
-
-        magnitude[row, col,0] =math.sqrt(sobelx ** 2 + sobely ** 2)
-        magnitude[row, col,1] = math.sqrt(sobelx ** 2 + sobely ** 2)
-        magnitude[row, col,2] = math.sqrt(sobelx ** 2 + sobely ** 2)
-        angle[row, col,0] =math.atan2(sobely, sobelx)
-        angle[row, col,1] =math.atan2(sobely, sobelx)
-        angle[row, col,2] =math.atan2(sobely, sobelx)
-
-
-@cuda.jit
-def threshold_kernel(magnitude, thresholded):
-    threshold_low = 51  
-    threshold_high = 102
-    row, col = cuda.grid(2) 
-    if row < magnitude.shape[0] and col < magnitude.shape[1]:
-        if magnitude[row, col,0] > threshold_high:
-            thresholded[row, col,0] = 255
-            thresholded[row, col,1] = 255
-            thresholded[row, col,2] = 255
-        elif magnitude[row, col,0] < threshold_low:
-            thresholded[row, col,0] = 0
-            thresholded[row, col,1] = 0
-            thresholded[row, col,2] = 0
+        if row == 0 or row == input_image.shape[0] - 1 or col == 0 or col == input_image.shape[1] - 1:
+            magnitude[row, col, 0] = 0
+            angle[row, col, 0] = 0
         else:
-            thresholded[row, col,0] = 128
-            thresholded[row, col,1] = 128
-            thresholded[row, col,2] = 128
+            # Convolution
+            Ix = (
+                input_image[row - 1, col - 1, 0] * (-1) + input_image[row - 1, col, 0] * 0 + input_image[row - 1, col + 1, 0] * 1 +
+                input_image[row, col - 1, 0] * (-2) + input_image[row, col, 0] * 0 + input_image[row, col + 1, 0] * 2 +
+                input_image[row + 1, col - 1, 0] * (-1) + input_image[row + 1, col, 0] * 0 + input_image[row + 1, col + 1, 0] * 1
+            )
+            Iy = (
+                input_image[row - 1, col - 1, 0] * 1 + input_image[row - 1, col, 0] * 2 + input_image[row - 1, col + 1, 0] * 1 +
+                input_image[row, col - 1, 0] * 0 + input_image[row, col, 0] * 0 + input_image[row, col + 1, 0] * 0 +
+                input_image[row + 1, col - 1, 0] * (-1) + input_image[row + 1, col, 0] * (-2) + input_image[row + 1, col + 1, 0] * (-1)
+            )
+            # Clamp the sobel x and y value to 175
+            Ix = min(175,Ix)
+            Iy = min(175,Iy)
+            # Gradient magnitude
+            magnitude[row, col, 0] = math.sqrt(Ix ** 2 + Iy ** 2)
+            # Gradient angle
+            angle[row, col, 0] = math.atan2(Iy, Ix)
 
+
+# Noyau CUDA pour appliquer un seuillage
 @cuda.jit
-def hysterisis_kernel(thresholded, output_image):
+def threshold_kernel(magnitude, thresholded, highThreshold, lowThreshold):
 
+    M, N = magnitude.shape[:2]
     row, col = cuda.grid(2)
-    
-    if row < thresholded.shape[0] and col < thresholded.shape[1]:
-        if thresholded[row, col,0] == 255:
-            output_image[row, col,0] = 255
-            output_image[row, col,1] = 255
-            output_image[row, col,2] = 255
+    if row < M and col < N:
+        # Comparaison de la magnitude avec les seuils
+        if magnitude[row, col, 0] > highThreshold:
+            thresholded[row, col, 0] = 255
+            thresholded[row, col, 1] = 255
+            thresholded[row, col, 2] = 255
+        elif magnitude[row, col, 0] < lowThreshold:
+            thresholded[row, col, 0] = 0
+            thresholded[row, col, 1] = 0
+            thresholded[row, col, 2] = 0
         else:
-            output_image[row, col,0] = 0
-            output_image[row, col,1] = 0
-            output_image[row, col,2] = 0
+            thresholded[row, col, 0] = 127
+            thresholded[row, col, 1] = 127
+            thresholded[row, col, 2] = 127
 
-def process_image(imagetab, threads_per_block, blocks_per_grid,d_kernel, args):
-    output_bw =cuda.to_device(np.zeros_like(imagetab))
-    RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)
-    cuda.synchronize()
+# Noyau CUDA pour appliquer le traitement d'hystérésis
+@cuda.jit
+def hysterisis_kernel(thresholded, result):
+
+    M, N = thresholded.shape[:2]
+    weak = 127  # Valeur du pixel faible
+    strong = 255  # Valeur du pixel fort
+    row, col = cuda.grid(2)
+    if row < M and col < N:
+        if thresholded[row, col, 0] == weak:
+            for i in range(-1, 2):
+                for j in range(-1, 2):
+                    if 0 <= row + i < M and 0 <= col + j < N:
+                        if thresholded[row + i, col + j, 0] == strong:
+                            result[row, col, 0] = strong
+                            result[row, col, 1] = strong
+                            result[row, col, 2] = strong
+                            return
+            result[row, col, 0] = 0
+            result[row, col, 1] = 0
+            result[row, col, 2] = 0
+        else:
+            result[row, col, 0] = thresholded[row, col, 0]
+            result[row, col, 1] = thresholded[row, col, 1]
+            result[row, col, 2] = thresholded[row, col, 2]
+
+# Fonction principale pour traiter l'image
+def process_image(imagetab, threads_per_block, blocks_per_grid, d_kernel, args):
+
+    output_bw = cuda.to_device(np.zeros_like(imagetab))  # Création d'un tableau vide sur le GPU
+    RGBToBWKernel[blocks_per_grid, threads_per_block](imagetab, output_bw)  # Appel du noyau CUDA
+    cuda.synchronize()  # Attente de la fin de l'exécution sur le GPU
 
     if args.bw:
-        return output_bw.copy_to_host()
+        return output_bw.copy_to_host()  # Renvoie l'image en niveaux de gris vers le CPU
 
-    output_gaussian = cuda.to_device(np.zeros_like(imagetab))
-    gaussian_kernel[blocks_per_grid, threads_per_block](output_bw, output_gaussian,d_kernel)
-    cuda.synchronize()
+    output_gaussian = cuda.to_device(np.zeros_like(imagetab))  
+    gaussian_kernel[blocks_per_grid, threads_per_block](output_bw, output_gaussian, d_kernel)  
+    cuda.synchronize()  
 
     if args.gauss:
-        return output_gaussian.copy_to_host()
+        return output_gaussian.copy_to_host()  # Renvoie l'image après flou gaussien vers le CPU
 
-    magnitude = cuda.to_device(np.zeros_like(imagetab, dtype=np.float32))
-    angle = cuda.to_device(np.zeros_like(imagetab, dtype=np.float32))
-    sobel_kernel[blocks_per_grid, threads_per_block](output_gaussian, magnitude, angle)
-    cuda.synchronize()
+    magnitude = cuda.to_device(np.zeros_like(imagetab, dtype=np.float32))  
+    angle = cuda.to_device(np.zeros_like(imagetab, dtype=np.float32))  
+    sobel_kernel[blocks_per_grid, threads_per_block](output_gaussian, magnitude, angle) 
+    cuda.synchronize() 
 
     if args.sobel:
-        return magnitude.copy_to_host(),angle.copy_to_host()
+        return magnitude.copy_to_host(), angle.copy_to_host()  # Renvoie la magnitude et l'angle vers le CPU
 
-    thresholded = cuda.to_device(np.zeros_like(imagetab))
-    threshold_kernel[blocks_per_grid, threads_per_block](magnitude, thresholded)
-    cuda.synchronize()
+    thresholded = cuda.to_device(np.zeros_like(imagetab))  
+    highThreshold = 102  # Seuil supérieur pour le seuillage
+    lowThreshold = 51  # Seuil inférieur pour le seuillage
+    threshold_kernel[blocks_per_grid, threads_per_block](magnitude, thresholded, highThreshold, lowThreshold)  
+    cuda.synchronize() 
 
     if args.threshold:
-        return thresholded.copy_to_host()
+        return thresholded.copy_to_host()  # Renvoie l'image seuillée vers le CPU
 
-    result=cuda.to_device(np.zeros_like(imagetab, dtype=np.uint8))
-    hysterisis_kernel[blocks_per_grid, threads_per_block](thresholded, result)
-    cuda.synchronize()
+    result = cuda.to_device(np.zeros_like(imagetab, dtype=np.uint8))  
+    hysterisis_kernel[blocks_per_grid, threads_per_block](thresholded, result)  
+    cuda.synchronize() 
 
-    return result.copy_to_host()
+    return result.copy_to_host()  # Renvoie l'image résultante vers le CPU
 
+# Fonction principale pour exécuter le programme
 def main():
+
+    # Analyse des arguments en ligne de commande
     parser = argparse.ArgumentParser(description='Canny Edge Detection')
     parser.add_argument('inputImage', help='Input image file')
     parser.add_argument('outputImage', help='Output image file')
@@ -172,44 +182,35 @@ def main():
     parser.add_argument('--gauss', action='store_true', help='Perform the bw_kernel and the gauss_kernel')
     parser.add_argument('--sobel', action='store_true', help='Perform all kernels up to sobel_kernel and write to disk the magnitude of each pixel')
     parser.add_argument('--threshold', action='store_true', help='Perform all kernels up to threshold_kernel')
-    kernel = np.array([[1, 4,6,4, 1], [4, 16, 24,16,4], [6, 24, 36,24,6],[4, 16, 24,16,4],[1, 4,6,4, 1]]) 
-    d_kernel=cuda.to_device(kernel)
+    kernel = np.array([[1, 4, 6, 4, 1], [4, 16, 24, 16, 4], [6, 24, 36, 24, 6], [4, 16, 24, 16, 4], [1, 4, 6, 4, 1]])  # Noyau gaussien
+    d_kernel = cuda.to_device(kernel)  # Copie du noyau gaussien vers le GPU
+    args = parser.parse_args()  # Analyse des arguments en ligne de commande
 
-    args = parser.parse_args()
-    threads_per_block = (16, 16)
-    if args.tb:
-        threads_per_block = (args.tb,args.tb)   
-
+    # Chargement de l'image et conversion en tableau numpy
     image = Image.open(args.inputImage)
     imagetab = np.array(image)
-    d_imagetab =cuda.to_device(imagetab )
+    d_imagetab = cuda.to_device(imagetab)  # Copie de l'image vers le GPU
 
-    threads_per_block,blocks_per_grid=compute_threads_and_blocks(imagetab,threads_per_block)
+    # Calcul des dimensions de la grille de threads
+    threads_per_block = (16, 16)
+    if args.tb:
+        threads_per_block = (args.tb, args.tb)
+    threads_per_block, blocks_per_grid = compute_threads_and_blocks(imagetab, threads_per_block)
 
-    result = process_image(d_imagetab, threads_per_block, blocks_per_grid,d_kernel, args)
-   
-    output_image_pillow = Image.fromarray(result)
-    output_image_pillow.save(args.outputImage)
-    print("L'image a été enregistrée avec succès sous",args.outputImage)
+    # Traitement de l'image en fonction des arguments spécifiés
+    if args.sobel:
+        magnitude, _ = process_image(d_imagetab, threads_per_block, blocks_per_grid, d_kernel, args)  # Appel de la fonction de traitement
+        output_image_pillow = Image.fromarray(magnitude[:, :, 0].astype(np.uint8), mode='L')  # Conversion en mode 'L' (niveaux de gris)
+        output_image_pillow.save(args.outputImage)  # Enregistrement de l'image 
+        print("L'image de magnitude a été enregistrée avec succès sous", args.outputImage)
+        return
+    else:
+        result = process_image(d_imagetab, threads_per_block, blocks_per_grid, d_kernel, args)  # Appel de la fonction de traitement
 
-    image = cv2.imread(args.inputImage, cv2.IMREAD_COLOR)  # Ajoutez le drapeau cv2.IMREAD_COLOR
-
-    #if args.bw:
-    #    result = bw_kernel(image)
-    # elif args.gauss:
-    #     result = gaussian_kernel(bw_kernel(image))
-    # elif args.sobel:
-    #     magnitude, _ = sobel_kernel(gaussian_kernel(bw_kernel(image)))
-    #     cv2.imwrite(args.outputImage, magnitude)
-    #     return
-    # elif args.threshold:
-    #     magnitude, _ = sobel_kernel(gaussian_kernel(bw_kernel(image)))
-    #     thresholded = threshold_kernel(magnitude, 50, 150)  # Adjust threshold values as needed
-    #     result = hysterisis_kernel(thresholded)
-    # else:
-    #     magnitude, _ = sobel_kernel(gaussian_kernel(bw_kernel(image)))
-    #     thresholded = threshold_kernel(magnitude, 50, 150)  # Adjust threshold values as needed
-    #     result = hysterisis_kernel(thresholded)
+        # Sauvegarde de l'image 
+        output_image_pillow = Image.fromarray(result)
+        output_image_pillow.save(args.outputImage)
+        print("L'image a été enregistrée avec succès sous", args.outputImage)
 
 if __name__ == '__main__':
-    main()
+    main()  # Exécution de la fonction principale
